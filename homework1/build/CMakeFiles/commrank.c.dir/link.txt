@@ -1,0 +1,1 @@
+/usr/bin/cc CMakeFiles/commrank.c.dir/commrank.c.o -o commrank.c  /opt/intel/oneapi/mpi/2021.11/lib/libmpi.so /usr/lib64/librt.a /usr/lib64/libpthread.a /usr/lib64/libdl.a 

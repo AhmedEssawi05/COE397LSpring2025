@@ -1,0 +1,7 @@
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/commrank.c.dir
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/edit_cache.dir
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/rebuild_cache.dir
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/list_install_components.dir
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/install.dir
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/install/local.dir
+/home1/10506/ahmedessawi05/COE397LSpring2025/homework1/build/CMakeFiles/install/strip.dir
