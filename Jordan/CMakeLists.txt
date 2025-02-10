@@ -1,5 +1,5 @@
 cmake_minimum_required( VERSION 3.13 )
-project( cprogram VERSION 1.0 )
+project( jordan VERSION 1.0 )
 
 add_executable( jordan jordan.c )
 find_package( MPI )
