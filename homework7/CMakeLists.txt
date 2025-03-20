@@ -1,13 +1,17 @@
-cmake_minimum_required( VERSION 3.13 )
-project( vectorsum VERSION 1.0 )
+cmake_minimum_required(VERSION 3.13)
+project(vectorsum VERSION 1.0)
 
-add_executable( vectorsum vectorsum.c )
-find_package( MPI )
-target_include_directories(
-	vectorsum PUBLIC
-	${MPI_C_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR} )
-target_link_libraries(
-	vectorsum PUBLIC 
-	${MPI_C_LIBRARIES} )
 
-install( TARGETS vectorsum DESTINATION . )
+find_package(OpenMP REQUIRED)
+
+
+add_executable(vectorsum vectorsum.c)
+
+
+if(OpenMP_C_FOUND)
+  target_link_libraries(vectorsum PUBLIC OpenMP::OpenMP_C)
+endif()
+target_link_libraries(vectorsum PUBLIC m)
+
+
+install(TARGETS vectorsum DESTINATION .)
