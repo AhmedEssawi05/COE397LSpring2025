@@ -1,13 +1,12 @@
-cmake_minimum_required( VERSION 3.13 )
-project( vectorsum VERSION 1.0 )
+cmake_minimum_required(VERSION 3.13)
+project(vectorsum VERSION 1.0 LANGUAGES CUDA)
 
-add_executable( vectorsum vectorsum.c )
-find_package( MPI )
-target_include_directories(
-	vectorsum PUBLIC
-	${MPI_C_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR} )
-target_link_libraries(
-	vectorsum PUBLIC 
-	${MPI_C_LIBRARIES} )
+add_executable(sharedmem sharedmem.cu)
 
-install( TARGETS vectorsum DESTINATION . )
+# You can add additional include directories if needed.
+target_include_directories(sharedmem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Link libraries if necessary (for example, if your CUDA code uses extra libraries).
+# target_link_libraries(sharedmem PUBLIC <your_libraries_here>)
+
+install(TARGETS sharedmem DESTINATION .)
