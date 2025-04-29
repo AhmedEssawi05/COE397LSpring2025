@@ -1,173 +1,174 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <mpi.h>
 #include <omp.h>
 
-// Graph structure to hold adjacency matrix and labels
-typedef struct {
-    int *labels;       // Labels for each node in the graph
-    int numVertices;   // Number of nodes in the graph
-    int **adjMatrix;   // Adjacency matrix representing the graph
-} Graph;
+// Hybrid MPI+OpenMP asynchronous label propagation on an Erdős–Rényi graph,
+// with adjacency‐list printing on rank 0.
 
-// Function to generate a random graph using the Erdős–Rényi model
-Graph* generateGraph(int n, double p) {
-    Graph *graph = malloc(sizeof(Graph));
-    graph->numVertices = n;
-    graph->adjMatrix = malloc(n * sizeof(int *));
-    graph->labels = malloc(n * sizeof(int));  // Labels for community detection
+int main(int argc, char **argv) {
+    MPI_Init(&argc,&argv);
+    int nprocs, rank;
+    MPI_Comm_size(MPI_COMM_WORLD,&nprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
 
-    for (int i = 0; i < n; i++) {
-        graph->adjMatrix[i] = malloc(n * sizeof(int));
-        for (int j = 0; j < n; j++) {
-            graph->adjMatrix[i][j] = (rand() / (double)RAND_MAX) < p ? 1 : 0;
+    const int    numNodes = 2304;   // total number of nodes
+    const double p        = 0.0001;     // edge probabilitys
+
+    // 1) Compute per-rank row counts & displacements
+    int *countsRows = malloc(nprocs * sizeof(int));
+    int *displsRows = malloc(nprocs * sizeof(int));
+    int base = numNodes / nprocs, rem = numNodes % nprocs, offset = 0;
+    for (int i = 0; i < nprocs; i++) {
+        countsRows[i] = base + (i < rem ? 1 : 0);
+        displsRows[i] = offset;
+        offset += countsRows[i];
+    }
+    int localN = countsRows[rank];
+
+    // 2) Rank 0 builds full adjacency, prints as adjacency list, then scatters
+    int *localAdj = malloc(localN * numNodes * sizeof(int));
+    if (!localAdj) { perror("malloc localAdj"); MPI_Abort(MPI_COMM_WORLD,1); }
+
+    if (rank == 0) {
+        int *fullAdj = malloc(numNodes * numNodes * sizeof(int));
+        if (!fullAdj) { perror("malloc fullAdj"); MPI_Abort(MPI_COMM_WORLD,1); }
+        srand(12345);
+        for (int i = 0; i < numNodes; i++) {
+            for (int j = 0; j < numNodes; j++) {
+                fullAdj[i*numNodes + j] = (rand()/(double)RAND_MAX) < p ? 1 : 0;
+            }
+        }
+
+        // Print adjacency list
+        // printf("Graph adjacency list:\n");
+        // for (int i = 0; i < numNodes; i++) {
+        //     printf("%d:", i);
+        //     for (int j = 0; j < numNodes; j++) {
+        //         if (fullAdj[i*numNodes + j])
+        //             printf(" %d", j);
+        //     }
+        //     printf("\n");
+        // }
+
+        // Prepare scatterv parameters
+        int *sendCounts = malloc(nprocs * sizeof(int));
+        int *sendDispls = malloc(nprocs * sizeof(int));
+        for (int i = 0; i < nprocs; i++) {
+            sendCounts[i] = countsRows[i] * numNodes;
+            sendDispls[i] = displsRows[i] * numNodes;
+        }
+        MPI_Scatterv(fullAdj, sendCounts, sendDispls, MPI_INT,
+                     localAdj, localN*numNodes, MPI_INT,
+                     0, MPI_COMM_WORLD);
+        free(fullAdj);
+        free(sendCounts);
+        free(sendDispls);
+    } else {
+        MPI_Scatterv(NULL, NULL, NULL, MPI_INT,
+                     localAdj, localN*numNodes, MPI_INT,
+                     0, MPI_COMM_WORLD);
+    }
+
+    // 3) Allocate label arrays
+    int *localLabels  = malloc(localN * sizeof(int));
+    int *newLocal     = malloc(localN * sizeof(int));
+    int *globalLabels = malloc(numNodes * sizeof(int));
+    if (!localLabels || !newLocal || !globalLabels) {
+        perror("malloc labels"); MPI_Abort(MPI_COMM_WORLD,1);
+    }
+
+    // 4) Initialize global labels
+    if (rank == 0) {
+        for (int i = 0; i < numNodes; i++) {
+            globalLabels[i] = i;
         }
     }
-    return graph;
-}
+    MPI_Bcast(globalLabels, numNodes, MPI_INT, 0, MPI_COMM_WORLD);
 
-// Function to partition the graph for each MPI process
-Graph* partitionGraph(Graph *graph, int numProcesses, int processRank) {
-    int nodesPerProcess = graph->numVertices / numProcesses;
-    Graph *subgraph = malloc(sizeof(Graph));
-    subgraph->numVertices = nodesPerProcess;
-    subgraph->adjMatrix = malloc(nodesPerProcess * sizeof(int *));
-    subgraph->labels = malloc(nodesPerProcess * sizeof(int));
-
-    for (int i = processRank * nodesPerProcess; i < (processRank + 1) * nodesPerProcess; i++) {
-        subgraph->adjMatrix[i - processRank * nodesPerProcess] = graph->adjMatrix[i];
-        subgraph->labels[i - processRank * nodesPerProcess] = graph->labels[i];
+    // 5) Copy to localLabels
+    for (int i = 0; i < localN; i++) {
+        int gidx = displsRows[rank] + i;
+        localLabels[i] = globalLabels[gidx];
     }
 
-    return subgraph;
-}
+    // 6) Asynchronous propagation until convergence
+    int globalChanged;
+    double t0 = MPI_Wtime();
 
-// Boundary communication between MPI processes
-void boundaryCommunication(int *boundaryLabels, int boundaryCount, int rank, int numProcesses) {
-    MPI_Request sendRequest, recvRequest;
+    do {
+        int localChanged = 0;
 
-    for (int i = 0; i < numProcesses; i++) {
-        if (i != rank) {
-            MPI_Isend(boundaryLabels, boundaryCount, MPI_INT, i, 0, MPI_COMM_WORLD, &sendRequest);
-            MPI_Irecv(boundaryLabels, boundaryCount, MPI_INT, i, 0, MPI_COMM_WORLD, &recvRequest);
-        }
-    }
+        // Update each global node in turn
+        for (int gidx = 0; gidx < numNodes; gidx++) {
+            int owner = 0;
+            // find owner rank for gidx
+            while (!(displsRows[owner] <= gidx &&
+                     gidx < displsRows[owner] + countsRows[owner])) {
+                owner++;
+            }
+            int newLabel = globalLabels[gidx];
 
-    MPI_Wait(&sendRequest, MPI_STATUS_IGNORE);
-    MPI_Wait(&recvRequest, MPI_STATUS_IGNORE);
-}
-
-// Label propagation algorithm
-void labelPropagation(Graph *subgraph, int maxIterations, double convergenceThreshold, int processRank, int numProcesses) {
-    int *newLabels = malloc(subgraph->numVertices * sizeof(int));
-    int converged = 0;
-
-    // Initialize labels (each node starts with a unique label)
-    for (int i = 0; i < subgraph->numVertices; i++) {
-        subgraph->labels[i] = i;
-    }
-
-    int iteration = 0;
-    while (iteration < maxIterations && !converged) {
-        converged = 1;
-
-        // Label propagation step (parallel within process using OpenMP)
-        #pragma omp parallel for shared(subgraph)
-        for (int i = 0; i < subgraph->numVertices; i++) {
-            // Count the frequency of labels among neighbors
-            int *neighborLabels = (int*) calloc(subgraph->numVertices, sizeof(int));
-
-            // Check the neighbors of node i (based on the adjacency matrix)
-            for (int j = 0; j < subgraph->numVertices; j++) {
-                if (subgraph->adjMatrix[i][j] == 1) {  // If there's an edge between node i and node j
-                    neighborLabels[subgraph->labels[j]]++;  // Increment the count for the label of node j
+            if (rank == owner) {
+                int i = gidx - displsRows[rank];
+                // count neighbor labels
+                int *counts = calloc(numNodes, sizeof(int));
+                int rowOff = i * numNodes;
+                #pragma omp parallel for
+                for (int j = 0; j < numNodes; j++) {
+                    if (localAdj[rowOff + j]) {
+                        #pragma omp atomic
+                        counts[ globalLabels[j] ]++;
+                    }
                 }
-            }
-
-            // Find the most frequent label among the neighbors
-            int maxCount = 0;
-            int mostFrequentLabel = subgraph->labels[i];  // Default to the current label
-            for (int j = 0; j < subgraph->numVertices; j++) {
-                if (neighborLabels[j] > maxCount) {
-                    maxCount = neighborLabels[j];
-                    mostFrequentLabel = j;
+                int best = localLabels[i], top = 0;
+                for (int k = 0; k < numNodes; k++) {
+                    if (counts[k] > top) {
+                        top = counts[k];
+                        best = k;
+                    }
                 }
+                free(counts);
+                if (best != localLabels[i]) {
+                    localChanged = 1;
+                    localLabels[i] = best;
+                    newLabel = best;
+                }
+                globalLabels[gidx] = newLabel;
             }
 
-            // Update the label of node i
-            newLabels[i] = mostFrequentLabel;
-
-            // Free the memory for neighbor labels
-            free(neighborLabels);
-        }
-
-        // Check for convergence (if labels haven't changed)
-        for (int i = 0; i < subgraph->numVertices; i++) {
-            if (subgraph->labels[i] != newLabels[i]) {
-                converged = 0;  // Labels have changed, so not converged yet
-                break;
+            // broadcast updated label for node gidx
+            MPI_Bcast(&newLabel, 1, MPI_INT, owner, MPI_COMM_WORLD);
+            if (rank != owner) {
+                globalLabels[gidx] = newLabel;
             }
         }
 
-        // If not converged, copy the new labels back to subgraph labels
-        for (int i = 0; i < subgraph->numVertices; i++) {
-            subgraph->labels[i] = newLabels[i];
+        // global convergence test
+        MPI_Allreduce(&localChanged, &globalChanged, 1,
+                      MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+    } while (globalChanged);
+
+    double t1 = MPI_Wtime();
+
+    // 7) Print final labels on rank 0
+    if (rank == 0) {
+        printf("Final Node Labels (Community Assignments):\n");
+        for (int i = 0; i < numNodes; i++) {
+            printf("Node %d: Community %d\n", i, globalLabels[i]);
         }
-
-        iteration++;
+        printf("Converged in %f seconds\n", t1 - t0);
     }
 
-    free(newLabels);
-}
+    // cleanup
+    free(localAdj);
+    free(localLabels);
+    free(newLocal);
+    free(globalLabels);
+    free(countsRows);
+    free(displsRows);
 
-// Function to evaluate performance and measure execution time
-void evaluatePerformance(int numProcesses) {
-    double startTime = MPI_Wtime();  // Start time
-
-    // Here you could run the graph generation, partitioning, and label propagation
-
-    double endTime = MPI_Wtime();  // End time
-    if (numProcesses == 1) {  // Print only from rank 0
-        printf("Total Execution Time: %f seconds\n", endTime - startTime);
-    }
-}
-
-int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-
-    int numProcesses, processRank;
-    MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);  // Get the number of processes
-    MPI_Comm_rank(MPI_COMM_WORLD, &processRank);  // Get the rank of this process
-
-    // Record the start time for the program
-    double startTime = MPI_Wtime();  // Start time for execution
-
-    // Graph generation
-    int numNodes = 10000;
-    double edgeProbability = 0.1;
-    Graph* graph = generateGraph(numNodes, edgeProbability);
-
-    // Partition the graph for each process
-    Graph* subgraph = partitionGraph(graph, numProcesses, processRank);
-
-    // Run label propagation algorithm
-    int maxIterations = 100;
-    double convergenceThreshold = 0.01;
-    labelPropagation(subgraph, maxIterations, convergenceThreshold, processRank, numProcesses);
-
-    // Record the end time for the program
-    double endTime = MPI_Wtime();  // End time for execution
-
-    // Print total execution time from rank 0 only
-    if (processRank == 0) {
-        printf("Total Execution Time: %f seconds\n", endTime - startTime);
-    }
-
-    // Performance evaluation (optional)
-    evaluatePerformance(numProcesses);
-
-    // Finalize MPI
     MPI_Finalize();
-
     return 0;
 }
